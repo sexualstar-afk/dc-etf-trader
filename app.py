@@ -1,35 +1,72 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
+import numpy as np
 
-st.title("📈 DC ETF 트레이더 (실전버전)")
+st.title("⚡ 전력/원전 ETF TOP3 자동 스캐너")
 
 etf_list = {
+    "에너지": "305540",
+    "2차전지": "305720",
+    "친환경에너지": "385510",
+    "전력설비": "371460",
     "건설": "195970",
-    "반도체": "091170",
-    "S&P500": "360750",
-    "코스피200": "069500"
+    "철강": "139230",
+    "기계": "102960",
+    "인프라": "329200",
+    "고배당": "161510",
+    "금융": "157450"
 }
 
-selected = st.selectbox("ETF 선택", list(etf_list.keys()))
-code = etf_list[selected]
+results = []
 
-df = yf.download(f"{code}.KS", period="3mo")
+for name, code in etf_list.items():
+    try:
+        df = yf.download(f"{code}.KS", period="3mo", progress=False)
 
-tp = (df['High'] + df['Low'] + df['Close']) / 3
-df['VWAP'] = (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
-df['RSI'] = ta.rsi(df['Close'], length=14)
+        if len(df) < 30:
+            continue
 
-latest = df.iloc[-1]
+        tp = (df['High'] + df['Low'] + df['Close']) / 3
+        df['VWAP'] = (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
 
-st.write(f"현재가: {latest['Close']:.0f}")
-st.write(f"VWAP: {latest['VWAP']:.0f}")
-st.write(f"RSI: {latest['RSI']:.1f}")
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
 
-if latest['Close'] < latest['VWAP'] and latest['RSI'] < 40:
-    st.success("🔥 매수 가능")
-elif latest['Close'] > latest['VWAP'] * 1.01:
-    st.error("💰 익절 구간")
-else:
-    st.warning("대기")
+        latest = df.iloc[-1]
+
+        avg_vol = df['Volume'].rolling(20).mean().iloc[-1]
+        vol_score = latest['Volume'] / avg_vol
+
+        score = 0
+
+        if latest['Close'] < latest['VWAP']:
+            score += 3
+        if latest['RSI'] < 40:
+            score += 3
+        if vol_score > 2:
+            score += 4
+
+        results.append({
+            "ETF": name,
+            "가격": int(latest['Close']),
+            "RSI": round(latest['RSI'], 1),
+            "거래량배수": round(vol_score, 2),
+            "점수": score
+        })
+
+    except:
+        continue
+
+df_result = pd.DataFrame(results)
+
+top3 = df_result.sort_values(by="점수", ascending=False).head(3)
+
+st.subheader("🔥 오늘의 TOP 3")
+st.dataframe(top3, use_container_width=True)
+
+st.subheader("📊 전체 ETF 순위")
+st.dataframe(df_result.sort_values(by="점수", ascending=False), use_container_width=True)

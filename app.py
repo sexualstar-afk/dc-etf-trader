@@ -1,86 +1,118 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
-import numpy as np
+import requests
 
-st.title("⚡ KODEX / TIGER 테마 ETF 자동 스캐너 (TOP3 추천)")
+st.title("🔥 KODEX / TIGER ETF 트레이딩 스캐너 (VWAP + MACD)")
 
-# ✔ KODEX + TIGER 테마 ETF (데이터 검증된 것 위주)
+# ✔ ETF 구성 (균형형)
 etf_list = {
-    "KODEX 2차전지": "305720",
+    "TIGER 2차전지테마": "305540",
     "KODEX 반도체": "091170",
+    "TIGER 반도체": "091230",
     "KODEX 건설": "117700",
     "KODEX 철강": "139230",
-    "KODEX IT": "266370",
-
-    "TIGER 반도체TOP10": "396500",
-    "TIGER 2차전지소재": "305540",
+    "TIGER 원자력": "457480",
+    "TIGER 친환경에너지": "475070",
+    "KODEX 기계장비": "102960",
     "TIGER 코리아테크": "329200",
-    "TIGER AI반도체": "466950",
-    "TIGER 기후변화": "400570"
+    "KODEX 금융": "157450"
 }
+
+# ✔ 네이버 데이터
+def get_price(code):
+    url = f"https://finance.naver.com/item/sise_day.naver?code={code}"
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    df = pd.read_html(requests.get(url, headers=headers).text, encoding='euc-kr')[0]
+    df = df.dropna()
+
+    df = df.rename(columns={
+        '종가': 'Close',
+        '거래량': 'Volume'
+    })
+
+    df = df[['Close', 'Volume']]
+
+    return df[::-1]
+
 
 results = []
 
 for name, code in etf_list.items():
     try:
-        # ✔ 야후 데이터 가져오기
-        df = yf.download(f"{code}.KS", period="3mo", progress=False)
+        df = get_price(code)
 
-        if df is None or df.empty or len(df) < 30:
+        if df.empty or len(df) < 30:
             continue
 
+        # -----------------------------
         # ✔ VWAP 계산
-        tp = (df['High'] + df['Low'] + df['Close']) / 3
-        df['VWAP'] = (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
+        # -----------------------------
+        price = df['Close']
+        volume = df['Volume']
 
-        # ✔ RSI 계산 (직접 계산)
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
+        df['VWAP'] = (price * volume).cumsum() / volume.cumsum()
+
+        # -----------------------------
+        # ✔ MACD 계산
+        # -----------------------------
+        ema12 = price.ewm(span=12, adjust=False).mean()
+        ema26 = price.ewm(span=26, adjust=False).mean()
+
+        df['MACD'] = ema12 - ema26
+        df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
 
         latest = df.iloc[-1]
 
-        # ✔ 거래량 분석
-        avg_vol = df['Volume'].rolling(20).mean().iloc[-1]
+        # -----------------------------
+        # ✔ 거래량
+        # -----------------------------
+        avg_vol = volume.rolling(10).mean().iloc[-1]
         vol_score = latest['Volume'] / avg_vol if avg_vol > 0 else 0
 
-        # ✔ 점수 계산 (핵심 전략)
+        # -----------------------------
+        # ✔ 점수 시스템 (핵심)
+        # -----------------------------
         score = 0
+
+        # VWAP 눌림
         if latest['Close'] < latest['VWAP']:
             score += 3
-        if latest['RSI'] < 40:
-            score += 3
-        if vol_score > 2:
+
+        # MACD 상승 전환
+        if latest['MACD'] > latest['Signal']:
             score += 4
+
+        # 거래량 증가
+        if vol_score > 1.5:
+            score += 3
 
         results.append({
             "ETF": name,
             "가격": int(latest['Close']),
-            "RSI": round(latest['RSI'], 1),
-            "VWAP괴리%": round((latest['Close'] - latest['VWAP']) / latest['VWAP'] * 100, 2),
+            "VWAP": int(latest['VWAP']),
+            "MACD": round(latest['MACD'], 2),
+            "Signal": round(latest['Signal'], 2),
             "거래량배수": round(vol_score, 2),
             "점수": score
         })
 
-    except Exception as e:
+    except:
         continue
 
-# ✔ 결과 처리
+
+# -----------------------------
+# ✔ 결과 출력
+# -----------------------------
 if len(results) == 0:
-    st.error("❌ 데이터 없음 → 일부 ETF는 야후 미지원 (정상 현상)")
+    st.error("❌ 데이터 없음")
 else:
     df_result = pd.DataFrame(results)
 
-    if "점수" in df_result.columns:
-        top3 = df_result.sort_values(by="점수", ascending=False).head(3)
+    top3 = df_result.sort_values(by="점수", ascending=False).head(3)
 
-        st.subheader("🔥 오늘의 TOP 3 추천")
-        st.dataframe(top3, use_container_width=True)
+    st.subheader("🔥 TOP 3 추천 (VWAP + MACD)")
+    st.dataframe(top3, use_container_width=True)
 
-        st.subheader("📊 전체 ETF 순위")
-        st.dataframe(df_result.sort_values(by="점수", ascending=False), use_container_width=True)
-    else:
-        st.error("❌ 점수 계산 오류")
+    st.subheader("📊 전체 ETF 순위")
+    st.dataframe(df_result.sort_values(by="점수", ascending=False), use_container_width=True)

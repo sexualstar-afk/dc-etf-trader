@@ -1,117 +1,117 @@
-import streamlit as st
-import yfinance as yf
+import time
 import pandas as pd
 import requests
+from pykrx import stock
 
-st.title("🔥 한국 ETF 트레이딩 스캐너 (VWAP + MACD + TOP3)")
+# 🔔 텔레그램 설정
+TOKEN = "여기에_토큰"
+CHAT_ID = "여기에_ID"
 
-# 🔥 ETF 12개 (레버리지/인버스 제외, 테마 중심)
+def send(msg):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+
+# 🔥 요즘 테마 ETF 12종목
 etf_list = {
-    "반도체": "091170.KS",
-    "2차전지": "305720.KS",
-    "건설": "195970.KS",
-    "금융": "157450.KS",
-    "철강": "139230.KS",
-    "에너지화학": "308620.KS",
-    "증권": "102970.KS",
-    "보험": "140700.KS",
-    "은행": "091180.KS",
-    "기계장비": "102780.KS",
-    "미디어": "266420.KS",
-    "바이오": "244580.KS"
+    "반도체": "091170",
+    "2차전지": "305720",
+    "AI반도체": "396500",
+    "전력인프라": "117460",
+    "건설": "195970",
+    "기계": "102780",
+    "철강": "139230",
+    "금융": "157450",
+    "증권": "102970",
+    "보험": "140700",
+    "친환경": "385510",
+    "로봇": "457450"
 }
 
-# 🔔 텔레그램 설정 (원하면 사용)
-USE_ALERT = False
-TOKEN = "여기에_봇토큰"
-CHAT_ID = "여기에_채팅ID"
+# 중복 알림 방지
+last_signal = {}
 
-def send_alert(msg):
-    if USE_ALERT:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
+print("🔥 ETF 자동 스캐너 시작")
 
-results = []
-
-for name, code in etf_list.items():
+while True:
     try:
-        df = yf.download(code, period="3mo", progress=False)
+        today = pd.Timestamp.today().strftime("%Y%m%d")
 
-        if df.empty or len(df) < 30:
-            continue
+        for name, code in etf_list.items():
+            df = stock.get_etf_ohlcv_by_date(
+                fromdate="20240101",
+                todate=today,
+                ticker=code
+            )
 
-        # ✔ VWAP
-        tp = (df['High'] + df['Low'] + df['Close']) / 3
-        df['VWAP'] = (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
+            if df.empty or len(df) < 30:
+                continue
 
-        # ✔ MACD
-        ema12 = df['Close'].ewm(span=12, adjust=False).mean()
-        ema26 = df['Close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = ema12 - ema26
-        df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+            df = df.rename(columns={
+                "종가": "Close",
+                "거래량": "Volume",
+                "고가": "High",
+                "저가": "Low"
+            })
 
-        latest = df.iloc[-1]
+            # -----------------
+            # 지표 계산
+            # -----------------
 
-        # ✔ 거래량 점수
-        avg_vol = df['Volume'].rolling(10).mean().iloc[-1]
-        vol_score = latest['Volume'] / avg_vol if avg_vol > 0 else 0
+            # VWAP
+            tp = (df['High'] + df['Low'] + df['Close']) / 3
+            df['VWAP'] = (tp * df['Volume']).cumsum() / df['Volume'].cumsum()
 
-        # ✔ 점수 계산
-        score = 0
+            # MACD
+            ema12 = df['Close'].ewm(span=12).mean()
+            ema26 = df['Close'].ewm(span=26).mean()
+            df['MACD'] = ema12 - ema26
+            df['Signal'] = df['MACD'].ewm(span=9).mean()
 
-        if latest['Close'] < latest['VWAP']:
-            score += 3
+            # 이동평균선
+            df['MA20'] = df['Close'].rolling(20).mean()
 
-        if latest['MACD'] > latest['Signal']:
-            score += 4
+            latest = df.iloc[-1]
 
-        if vol_score > 1.5:
-            score += 3
+            # 거래량
+            avg_vol = df['Volume'].rolling(10).mean().iloc[-1]
+            vol_ratio = latest['Volume'] / avg_vol if avg_vol > 0 else 0
 
-        # ✔ 매수 / 매도 신호
-        buy = (
-            latest['Close'] < latest['VWAP'] and
-            latest['MACD'] > latest['Signal'] and
-            vol_score > 1.5
-        )
+            # -----------------
+            # 매수 조건
+            # -----------------
+            buy = (
+                latest['Close'] < latest['VWAP'] and
+                latest['MACD'] > latest['Signal'] and
+                latest['Close'] > latest['MA20'] and
+                vol_ratio > 1.5
+            )
 
-        sell = (
-            latest['Close'] > latest['VWAP'] and
-            latest['MACD'] < latest['Signal']
-        )
+            # -----------------
+            # 매도 조건
+            # -----------------
+            sell = (
+                latest['Close'] > latest['VWAP'] and
+                latest['MACD'] < latest['Signal']
+            )
 
-        results.append({
-            "ETF": name,
-            "가격": int(latest['Close']),
-            "VWAP": int(latest['VWAP']),
-            "MACD": round(latest['MACD'], 2),
-            "거래량배수": round(vol_score, 2),
-            "점수": score,
-            "매수": "🟢" if buy else "",
-            "매도": "🔴" if sell else ""
-        })
+            signal = None
+            if buy:
+                signal = "BUY"
+            elif sell:
+                signal = "SELL"
 
-    except:
-        continue
+            # -----------------
+            # 중복 알림 방지
+            # -----------------
+            if signal and last_signal.get(name) != signal:
+                msg = f"{'🟢 매수' if signal=='BUY' else '🔴 매도'}\n{name}\n가격:{int(latest['Close'])}"
+                send(msg)
+                last_signal[name] = signal
 
-# 🔥 결과 처리
-if len(results) == 0:
-    st.error("❌ 데이터 없음 (종목 코드 확인 필요)")
-else:
-    df_result = pd.DataFrame(results)
+        print("✔ 스캔 완료")
 
-    # TOP3
-    top3 = df_result.sort_values(by="점수", ascending=False).head(3)
+    except Exception as e:
+        print("에러:", e)
 
-    st.subheader("🔥 TOP3 추천")
-    st.dataframe(top3, use_container_width=True)
-
-    st.subheader("📊 전체 순위")
-    st.dataframe(df_result.sort_values(by="점수", ascending=False), use_container_width=True)
-
-    # 🔔 TOP3 알림
-    msg = "🔥 ETF TOP3\n"
-    for i, row in top3.iterrows():
-        msg += f"{row['ETF']} | 점수:{row['점수']}\n"
-
-    send_alert(msg)
+    # 🔥 3분마다 실행
+    time.sleep(180)
